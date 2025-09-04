@@ -29,7 +29,6 @@ class PrintService {
     try {
       const printers = await getPrinters();
       
-      // Garantir que sempre retornamos um array
       if (!printers || !Array.isArray(printers)) {
         console.warn('getPrinters() não retornou um array válido:', printers);
         return [];
@@ -43,7 +42,6 @@ class PrintService {
       return printers;
     } catch (error) {
       console.error('Erro ao obter impressoras disponíveis:', error);
-      // Retorna um array vazio ao invés de lançar um erro
       return [];
     }
   }
@@ -53,25 +51,48 @@ class PrintService {
     try {
       const printers = await this.getAvailablePrinters();
       
-      // Verificar se printers é um array válido
       if (!Array.isArray(printers)) {
         console.log('Printers não é um array válido:', printers);
         return null;
       }
+
+      const zebraPatterns = [
+        'zebra',
+        'zdesigner',
+        'zd220',
+        'zd230',
+        'zd410',
+        'zd420',
+        'zd500',
+        'zd620',
+        'zt200',
+        'zt300',
+        'zt400',
+        'zt500',
+        'zt600',
+        'gc420',
+        'gk420',
+        'gx420',
+        'gx430',
+        'zpl'
+      ];
       
-      // Filtrar impressoras inválidas e procurar por Zebra
       return printers.find(printer => {
         if (!printer) return false;
         
-        const hasValidName = printer.name && typeof printer.name === 'string';
-        const hasValidDisplayName = printer.displayName && typeof printer.displayName === 'string';
+        const name = printer.name && typeof printer.name === 'string' 
+          ? printer.name.toLowerCase() 
+          : '';
+          
+        const displayName = printer.displayName && typeof printer.displayName === 'string' 
+          ? printer.displayName.toLowerCase() 
+          : '';
         
-        if (hasValidName && printer.name.toLowerCase().includes('zebra')) {
-          return true;
-        }
-        
-        if (hasValidDisplayName && printer.displayName.toLowerCase().includes('zebra')) {
-          return true;
+        for (const pattern of zebraPatterns) {
+          if (name.includes(pattern) || displayName.includes(pattern)) {
+            console.log(`Impressora Zebra encontrada: ${printer.name} (corresponde ao padrão: ${pattern})`);
+            return true;
+          }
         }
         
         return false;
@@ -145,7 +166,6 @@ class PrintService {
 
       const options = {
         printer: printerName,
-        // Add any specific Zebra printer options here
         scale: 'noscale', // Don't scale the PDF
         silent: true, // Run silently without showing print dialog
       };

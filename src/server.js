@@ -44,16 +44,12 @@ app.get('/printers', async (request, reply) => {
   }
 });
 
-// Endpoint para testar o funcionamento básico da biblioteca de impressão
 app.get('/test-pdf-to-printer', async (request, reply) => {
   try {
-    // Importar diretamente para testar
     const pdfToPrinter = await import('pdf-to-printer');
     
-    // Verificar se as funções existem
     const functions = Object.keys(pdfToPrinter);
     
-    // Tentar obter impressoras diretamente
     let printers = [];
     let error = null;
     
@@ -90,14 +86,90 @@ app.get('/test-pdf-to-printer', async (request, reply) => {
   }
 });
 
+app.get('/zd220-printer', async (request, reply) => {
+  try {
+    const allPrinters = await printService.getAvailablePrinters();
+    
+    const zd220Printer = allPrinters.find(p => 
+      p?.name?.includes('ZDesigner ZD220') || 
+      p?.name?.includes('ZD220')
+    );
+    
+    if (zd220Printer) {
+      return { 
+        success: true, 
+        printer: zd220Printer,
+        message: `Impressora ZD220 encontrada: ${zd220Printer.name}`
+      };
+    }
+    
+    return reply.status(404).send({
+      success: false,
+      error: 'Impressora ZD220 não encontrada',
+      availablePrinters: allPrinters.map(p => ({ 
+        name: p?.name || 'Unnamed'
+      }))
+    });
+  } catch (error) {
+    app.log.error('Error finding ZD220 printer:', error);
+    return reply.status(500).send({
+      success: false,
+      error: 'Falha ao procurar impressora ZD220',
+      details: error.message
+    });
+  }
+});
+
+app.post('/print-zd220', async (request, reply) => {
+  try {
+    const { pdfUrl } = request.body;
+    
+    if (!pdfUrl) {
+      return reply.status(400).send({
+        success: false,
+        error: 'URL do PDF não fornecida'
+      });
+    }
+    
+    const allPrinters = await printService.getAvailablePrinters();
+    
+    const zd220Printer = allPrinters.find(p => 
+      p?.name?.includes('ZDesigner ZD220') || 
+      p?.name?.includes('ZD220')
+    );
+    
+    if (!zd220Printer) {
+      return reply.status(404).send({
+        success: false,
+        error: 'Impressora ZD220 não encontrada',
+        availablePrinters: allPrinters.map(p => p?.name || 'Unnamed')
+      });
+    }
+    
+    const result = await printService.printPdfFromUrl(pdfUrl, zd220Printer.name);
+    
+    return {
+      success: true,
+      message: `PDF enviado para impressora ${zd220Printer.name}`,
+      result
+    };
+    
+  } catch (error) {
+    app.log.error('Erro ao imprimir na ZD220:', error);
+    return reply.status(500).send({
+      success: false,
+      error: 'Falha ao imprimir na ZD220',
+      details: error.message
+    });
+  }
+});
+
 app.get('/zebra-printer', async (request, reply) => {
   try {
-    // Buscar todas as impressoras primeiro para logs
     console.log('Buscando todas as impressoras disponíveis...');
     const allPrinters = await printService.getAvailablePrinters();
     console.log(`Total de impressoras disponíveis: ${allPrinters.length}`);
     
-    // Buscar impressora Zebra
     console.log('Procurando por impressora Zebra...');
     const zebraPrinter = await printService.findZebraPrinter();
     
@@ -105,15 +177,25 @@ app.get('/zebra-printer', async (request, reply) => {
       console.log(`Impressora Zebra encontrada: ${zebraPrinter.name}`);
       return { 
         success: true, 
-        printer: zebraPrinter 
+        printer: zebraPrinter,
+        message: `Impressora Zebra encontrada: ${zebraPrinter.name}`
       };
     }
     
-    console.log('Nenhuma impressora Zebra encontrada.');
-    // Retornamos mais informação no erro para debug
-    return reply.status(404).send({ 
+    console.log('Nenhuma impressora Zebra encontrada mesmo após verificar padrões comuns.');
+    
+    const potentialZebraPrinters = allPrinters.filter(p => {
+      const name = p?.name?.toLowerCase() || '';
+      return name.includes('zdesigner') || 
+             name.includes('zd') || 
+             name.includes('zebra') ||
+             name.includes('zpl');
+    });
+    
+    return reply.status(200).send({ 
       success: false, 
       error: 'Zebra printer not found',
+      potentialZebraPrinters: potentialZebraPrinters.length > 0 ? potentialZebraPrinters : 'Nenhuma encontrada',
       availablePrinters: allPrinters.map(p => ({ 
         name: p?.name || 'Unnamed', 
         displayName: p?.displayName || 'No Display Name'
