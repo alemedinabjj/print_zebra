@@ -44,15 +44,80 @@ app.get('/printers', async (request, reply) => {
   }
 });
 
+// Endpoint para testar o funcionamento básico da biblioteca de impressão
+app.get('/test-pdf-to-printer', async (request, reply) => {
+  try {
+    // Importar diretamente para testar
+    const pdfToPrinter = await import('pdf-to-printer');
+    
+    // Verificar se as funções existem
+    const functions = Object.keys(pdfToPrinter);
+    
+    // Tentar obter impressoras diretamente
+    let printers = [];
+    let error = null;
+    
+    try {
+      if (typeof pdfToPrinter.getPrinters === 'function') {
+        printers = await pdfToPrinter.getPrinters();
+      } else {
+        error = 'getPrinters não é uma função';
+      }
+    } catch (err) {
+      error = err.message;
+    }
+    
+    return {
+      success: true,
+      moduleInfo: {
+        functions,
+        hasGetPrinters: typeof pdfToPrinter.getPrinters === 'function',
+        hasPrint: typeof pdfToPrinter.print === 'function',
+      },
+      printersResult: {
+        success: !error,
+        error,
+        printers
+      }
+    };
+  } catch (error) {
+    app.log.error('Erro ao testar pdf-to-printer:', error);
+    return reply.status(500).send({
+      success: false,
+      error: 'Falha ao testar pdf-to-printer',
+      details: error.message
+    });
+  }
+});
+
 app.get('/zebra-printer', async (request, reply) => {
   try {
+    // Buscar todas as impressoras primeiro para logs
+    console.log('Buscando todas as impressoras disponíveis...');
+    const allPrinters = await printService.getAvailablePrinters();
+    console.log(`Total de impressoras disponíveis: ${allPrinters.length}`);
+    
+    // Buscar impressora Zebra
+    console.log('Procurando por impressora Zebra...');
     const zebraPrinter = await printService.findZebraPrinter();
+    
     if (zebraPrinter) {
-      return { success: true, printer: zebraPrinter };
+      console.log(`Impressora Zebra encontrada: ${zebraPrinter.name}`);
+      return { 
+        success: true, 
+        printer: zebraPrinter 
+      };
     }
+    
+    console.log('Nenhuma impressora Zebra encontrada.');
+    // Retornamos mais informação no erro para debug
     return reply.status(404).send({ 
       success: false, 
-      error: 'Zebra printer not found' 
+      error: 'Zebra printer not found',
+      availablePrinters: allPrinters.map(p => ({ 
+        name: p?.name || 'Unnamed', 
+        displayName: p?.displayName || 'No Display Name'
+      }))
     });
   } catch (error) {
     app.log.error('Error finding Zebra printer:', error);

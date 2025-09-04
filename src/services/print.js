@@ -28,20 +28,58 @@ class PrintService {
   async getAvailablePrinters() {
     try {
       const printers = await getPrinters();
+      
+      // Garantir que sempre retornamos um array
+      if (!printers || !Array.isArray(printers)) {
+        console.warn('getPrinters() não retornou um array válido:', printers);
+        return [];
+      }
+      
+      console.log(`Impressoras encontradas: ${printers.length}`);
+      printers.forEach((printer, index) => {
+        console.log(`Impressora ${index + 1}: ${printer?.name || 'Nome não disponível'}`);
+      });
+      
       return printers;
     } catch (error) {
-      console.error('Error getting available printers:', error);
-      throw new Error('Failed to get available printers');
+      console.error('Erro ao obter impressoras disponíveis:', error);
+      // Retorna um array vazio ao invés de lançar um erro
+      return [];
     }
   }
 
   
   async findZebraPrinter() {
-    const printers = await this.getAvailablePrinters();
-    return printers.find(printer => 
-      printer.name.toLowerCase().includes('zebra') || 
-      printer.displayName.toLowerCase().includes('zebra')
-    );
+    try {
+      const printers = await this.getAvailablePrinters();
+      
+      // Verificar se printers é um array válido
+      if (!Array.isArray(printers)) {
+        console.log('Printers não é um array válido:', printers);
+        return null;
+      }
+      
+      // Filtrar impressoras inválidas e procurar por Zebra
+      return printers.find(printer => {
+        if (!printer) return false;
+        
+        const hasValidName = printer.name && typeof printer.name === 'string';
+        const hasValidDisplayName = printer.displayName && typeof printer.displayName === 'string';
+        
+        if (hasValidName && printer.name.toLowerCase().includes('zebra')) {
+          return true;
+        }
+        
+        if (hasValidDisplayName && printer.displayName.toLowerCase().includes('zebra')) {
+          return true;
+        }
+        
+        return false;
+      });
+    } catch (error) {
+      console.error('Erro ao buscar impressora Zebra:', error);
+      return null;
+    }
   }
 
   
