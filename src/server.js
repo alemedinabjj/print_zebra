@@ -1,6 +1,7 @@
 import { fastify  } from 'fastify';
 import cors from '@fastify/cors';
 import printService from './services/print.js';
+import axios from 'axios';
 
 const app = fastify({
   logger: true
@@ -278,6 +279,46 @@ app.post('/print-from-url', async (request, reply) => {
     
     const result = await printService.printPdfFromUrl(pdfUrl, printerName);
     
+    // Se a impressão foi bem sucedida, atualizamos o status da etiqueta
+    if (result.success) {
+      try {
+        // Chamada ao endpoint AWS para atualização usando axios
+        const updateResponse = await axios.post(
+          'https://a7dlltxg6a.execute-api.us-east-2.amazonaws.com/dev/update-etiqueta-producao',
+          {
+            pdfUrl,
+            printStatus: 'completed',
+            timestamp: new Date().toISOString(),
+            printerName: printerName || 'default'
+          }
+        );
+        
+        app.log.info(`Etiqueta status update result: ${updateResponse.status}`);
+        
+        return { 
+          success: true, 
+          message: 'Print job from URL submitted successfully',
+          result,
+          etiquetaUpdate: {
+            success: updateResponse.status >= 200 && updateResponse.status < 300,
+            statusCode: updateResponse.status,
+            result: updateResponse.data
+          }
+        };
+      } catch (updateError) {
+        app.log.warn('Failed to update etiqueta status:', updateError);
+        return { 
+          success: true, 
+          message: 'Print job from URL submitted successfully, but etiqueta status update failed',
+          result,
+          etiquetaUpdate: {
+            success: false,
+            error: updateError.message
+          }
+        };
+      }
+    }
+    
     return { 
       success: true, 
       message: 'Print job from URL submitted successfully',
@@ -293,6 +334,8 @@ app.post('/print-from-url', async (request, reply) => {
     });
   }
 });
+
+// Endpoint de atualização de etiqueta removido, agora usando o endpoint AWS
 
 const start = async () => {
   try {
