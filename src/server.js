@@ -30,6 +30,10 @@ app.get('/', async (request, reply) => {
   return { message: 'Hello, World!' };
 });
 
+app.get('/health', async (request, reply) => {
+  return { status: 'ok', timestamp: new Date().toISOString() };
+});
+
 app.get('/printers', async (request, reply) => {
   try {
     const printers = await printService.getAvailablePrinters();
