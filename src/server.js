@@ -49,6 +49,41 @@ app.get('/printers', async (request, reply) => {
   }
 });
 
+app.get('/printer-status', async (request, reply) => {
+  try {
+    const printerName = request.query.printer || null;
+    
+    if (printerName) {
+      const state = printService.getPrinterState(printerName);
+      return {
+        success: true,
+        printer: printerName,
+        state
+      };
+    } else {
+      const printerStates = printService.getAllPrinterStates();
+      
+      const allPrinters = await printService.getAvailablePrinters();
+      
+      return {
+        success: true,
+        printerStates,
+        availablePrinters: allPrinters.map(p => ({
+          name: p.name,
+          status: printerStates[p.name]?.status || 'unknown'
+        }))
+      };
+    }
+  } catch (error) {
+    app.log.error('Error getting printer status:', error);
+    return reply.status(500).send({ 
+      success: false, 
+      error: 'Failed to get printer status',
+      details: error.message 
+    });
+  }
+});
+
 app.get('/test-pdf-to-printer', async (request, reply) => {
   try {
     const pdfToPrinter = await import('pdf-to-printer');
@@ -277,19 +312,44 @@ app.post('/print-from-url', async (request, reply) => {
 
     const printerName = request.query.printer || null;
     
-    const result = await printService.printPdfFromUrl(pdfUrl, printerName);
+    // Verificar se a impressora solicitada já está ocupada
+    if (printerName && printService.isPrinterBusy(printerName)) {
+      const printerState = printService.getPrinterState(printerName);
+      return reply.status(409).send({  // 409 Conflict - recurso ocupado
+        success: false,
+        error: 'Printer is busy',
+        printerState,
+        message: `A impressora ${printerName} está ocupada: ${printerState.message}`
+      });
+    }
+    
+    // Definir um timeout para toda a operação
+    const printPromise = printService.printPdfFromUrl(pdfUrl, printerName);
+    
+    // Timeout global para a operação de impressão (3 minutos)
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('Operação de impressão excedeu o tempo limite de 3 minutos')), 
+        3 * 60 * 1000);
+    });
+    
+    // Usar Promise.race para aplicar o timeout
+    const result = await Promise.race([printPromise, timeoutPromise]);
     
     // Se a impressão foi bem sucedida, atualizamos o status da etiqueta
     if (result.success) {
       try {
-        // Chamada ao endpoint AWS para atualização usando axios
+        // Chamada ao endpoint AWS para atualização usando axios com timeout
         const updateResponse = await axios.post(
           'https://a7dlltxg6a.execute-api.us-east-2.amazonaws.com/dev/update-etiqueta-producao',
           {
             pdfUrl,
             printStatus: 'completed',
             timestamp: new Date().toISOString(),
-            printerName: printerName || 'default'
+            printerName: result.printerName || printerName || 'default',
+            jobId: result.jobId
+          },
+          {
+            timeout: 10000 // 10 segundos de timeout para a chamada API
           }
         );
         
@@ -326,6 +386,16 @@ app.post('/print-from-url', async (request, reply) => {
     };
     
   } catch (error) {
+    // Verificar se o erro é porque a impressora está ocupada
+    if (error.message && error.message.includes('está ocupada')) {
+      app.log.warn(`Impressora ocupada: ${error.message}`);
+      return reply.status(409).send({  // 409 Conflict - recurso ocupado
+        success: false,
+        error: 'Printer is busy',
+        message: error.message
+      });
+    }
+    
     app.log.error('Error printing file from URL:', error);
     return reply.status(500).send({ 
       success: false, 

@@ -8,20 +8,184 @@ import http from 'http';
 
 const { print, getPrinters } = pdfToPrinter;
 
+// Controle da fila de impressão
 let isPrinting = false;
 const printQueue = [];
+
+const printerStates = new Map(); // Map<printerName, {status: 'idle'|'busy', jobStartTime: Date, jobId: string}>
+
+const MAX_CONCURRENT_DOWNLOADS = 2;
+let activeDownloads = 0;
 
 
 class PrintService {
   constructor() {
     this.tempDir = path.join(os.tmpdir(), 'zebra-print-jobs');
     this.ensureTempDir();
+    
+    this.setupCleanupInterval();
+    
+    this.setupPrinterStateCheck();
   }
 
 
   async ensureTempDir() {
     await fs.ensureDir(this.tempDir);
-    console.log(`Temporary directory created at: ${this.tempDir}`);
+    console.log(`[Setup] Diretório temporário criado em: ${this.tempDir}`);
+    
+    await this.cleanupTempFiles();
+  }
+  
+  
+  setupCleanupInterval() {
+    setInterval(() => {
+      this.cleanupTempFiles().catch(err => {
+        console.error('[Cleanup] Erro ao limpar arquivos temporários:', err);
+      });
+    }, 10 * 60 * 1000); // 10 minutos
+  }
+  
+  
+  async cleanupTempFiles() {
+    try {
+      const files = await fs.readdir(this.tempDir);
+      let count = 0;
+      
+      const now = Date.now();
+      const ONE_HOUR = 60 * 60 * 1000; // 1 hora em milissegundos
+      
+      for (const file of files) {
+        try {
+          const filePath = path.join(this.tempDir, file);
+          const stats = await fs.stat(filePath);
+          
+          if (now - stats.mtimeMs > ONE_HOUR) {
+            await fs.unlink(filePath);
+            count++;
+          }
+        } catch (err) {
+          console.warn(`[Cleanup] Erro ao processar arquivo: ${err.message}`);
+        }
+      }
+      
+      if (count > 0) {
+        console.log(`[Cleanup] ${count} arquivos temporários antigos removidos`);
+      }
+    } catch (err) {
+      console.error('[Cleanup] Erro ao listar diretório temporário:', err);
+    }
+  }
+  
+  
+  setupPrinterStateCheck() {
+    setInterval(() => {
+      this.checkPrinterStates().catch(err => {
+        console.error('[Printer State] Erro ao verificar estado das impressoras:', err);
+      });
+    }, 30 * 1000); // 30 segundos
+  }
+  
+  
+  async checkPrinterStates() {
+    const now = Date.now();
+    const TIMEOUT_THRESHOLD = 5 * 60 * 1000; // 5 minutos
+    
+    // Verificar e limpar estados de impressoras que podem ter travado
+    for (const [printerName, state] of printerStates.entries()) {
+      if (state.status === 'busy' && now - state.jobStartTime > TIMEOUT_THRESHOLD) {
+        console.warn(`[Printer State] Impressora ${printerName} parece estar presa em um trabalho por mais de 5 minutos. Resetando estado.`);
+        printerStates.set(printerName, {
+          status: 'idle',
+          jobId: null,
+          jobStartTime: null,
+          lastResetTime: now
+        });
+      }
+    }
+  }
+  
+  
+  isPrinterBusy(printerName) {
+    if (!printerStates.has(printerName)) {
+      return false;
+    }
+    
+    return printerStates.get(printerName).status === 'busy';
+  }
+  
+  
+  markPrinterAsBusy(printerName, jobId) {
+    printerStates.set(printerName, {
+      status: 'busy',
+      jobId,
+      jobStartTime: Date.now(),
+      lastResetTime: null
+    });
+    
+    console.log(`[Printer State] Impressora ${printerName} agora está ocupada com o job ${jobId}`);
+  }
+  
+  
+  markPrinterAsIdle(printerName) {
+    if (printerStates.has(printerName)) {
+      const oldState = printerStates.get(printerName);
+      
+      printerStates.set(printerName, {
+        status: 'idle',
+        jobId: null,
+        jobStartTime: null,
+        lastResetTime: Date.now(),
+        lastJobId: oldState.jobId,
+        lastJobDuration: Date.now() - oldState.jobStartTime
+      });
+      
+      console.log(`[Printer State] Impressora ${printerName} agora está livre (job anterior: ${oldState.jobId}, duração: ${(Date.now() - oldState.jobStartTime) / 1000}s)`);
+    } else {
+      printerStates.set(printerName, {
+        status: 'idle',
+        jobId: null,
+        jobStartTime: null,
+        lastResetTime: Date.now()
+      });
+    }
+  }
+  
+  
+  getPrinterState(printerName) {
+    if (!printerStates.has(printerName)) {
+      return {
+        status: 'unknown',
+        message: 'Estado da impressora desconhecido'
+      };
+    }
+    
+    const state = printerStates.get(printerName);
+    
+    if (state.status === 'busy') {
+      const durationSec = Math.round((Date.now() - state.jobStartTime) / 1000);
+      return {
+        status: 'busy',
+        jobId: state.jobId,
+        duration: durationSec,
+        message: `Impressora ocupada há ${durationSec} segundos com o trabalho ${state.jobId}`
+      };
+    }
+    
+    return {
+      status: 'idle',
+      lastJobId: state.lastJobId,
+      lastJobDuration: state.lastJobDuration ? Math.round(state.lastJobDuration / 1000) : null,
+      message: 'Impressora disponível'
+    };
+  }
+  
+  
+  getAllPrinterStates() {
+    const states = {};
+    for (const [printerName, state] of printerStates.entries()) {
+      states[printerName] = this.getPrinterState(printerName);
+    }
+    return states;
   }
 
 
@@ -114,18 +278,46 @@ class PrintService {
   
 
   async downloadPdfFromUrl(url) {
+    // Implementar controle de concorrência para downloads
+    while (activeDownloads >= MAX_CONCURRENT_DOWNLOADS) {
+      // Esperar um pouco antes de tentar novamente
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    
+    activeDownloads++;
+    console.log(`[Download] Iniciando download do PDF: ${url} (Downloads ativos: ${activeDownloads})`);
+    
+    try {
+      return await this._performDownload(url);
+    } finally {
+      activeDownloads--;
+      console.log(`[Download] Download concluído/falhou: ${url} (Downloads ativos restantes: ${activeDownloads})`);
+    }
+  }
+  
+  async _performDownload(url) {
     return new Promise((resolve, reject) => {
       const timestamp = new Date().getTime();
       const filePath = path.join(this.tempDir, `print-job-${timestamp}.pdf`);
       
       const fileStream = fs.createWriteStream(filePath);
+      let isCompleted = false;
       
       const httpClient = url.startsWith('https') ? https : http;
       
-      const request = httpClient.get(url, (response) => {
+      // Definir timeout para a requisição
+      const request = httpClient.get(url, { timeout: 30000 }, (response) => {
         if (response.statusCode !== 200) {
-          fs.unlink(filePath, () => {});
+          cleanup();
           reject(new Error(`Failed to download PDF: HTTP Status ${response.statusCode}`));
+          return;
+        }
+        
+        // Verificar o tamanho do arquivo
+        const contentLength = parseInt(response.headers['content-length'], 10);
+        if (contentLength && contentLength > 15 * 1024 * 1024) { // 15MB
+          cleanup();
+          reject(new Error(`PDF too large: ${Math.round(contentLength / 1024 / 1024)}MB`));
           return;
         }
         
@@ -136,33 +328,79 @@ class PrintService {
         
         response.pipe(fileStream);
         
+        response.on('error', (err) => {
+          cleanup();
+          reject(new Error(`Response error: ${err.message}`));
+        });
+        
         fileStream.on('finish', () => {
+          if (isCompleted) return;
+          isCompleted = true;
           fileStream.close();
           resolve(filePath);
         });
       });
       
+      // Definir timeout para a requisição
+      request.setTimeout(30000, () => {
+        request.abort();
+        cleanup();
+        reject(new Error('Download timeout after 30 seconds'));
+      });
+      
       request.on('error', (err) => {
-        fs.unlink(filePath, () => {}); 
-        reject(new Error(`Failed to download PDF: ${err.message}`));
+        cleanup();
+        reject(new Error(`Request error: ${err.message}`));
       });
       
       fileStream.on('error', (err) => {
-        fs.unlink(filePath, () => {}); 
-        reject(new Error(`Failed to save PDF: ${err.message}`));
+        cleanup();
+        reject(new Error(`File write error: ${err.message}`));
       });
+      
+      // Função para limpar recursos em caso de erro
+      function cleanup() {
+        if (isCompleted) return;
+        isCompleted = true;
+        try {
+          fileStream.close();
+          fs.unlink(filePath, () => {});
+        } catch (e) {
+          console.error('Error during cleanup:', e);
+        }
+      }
     });
   }
 
   async processPrintJob(filePath, printerName = null) {
+    // Gerar um ID único para este trabalho de impressão
+    const jobId = `job_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+    
     try {
+      console.log(`[Process Job] Iniciando job ${jobId} para arquivo: ${filePath}`);
+      
+      // Verifica se o arquivo existe antes de tentar imprimir
+      if (!await fs.pathExists(filePath)) {
+        throw new Error(`PDF file not found: ${filePath}`);
+      }
+      
       if (!printerName) {
+        console.log(`[Process Job] Nenhuma impressora especificada, buscando impressora Zebra`);
         const zebraPrinter = await this.findZebraPrinter();
         if (!zebraPrinter) {
           throw new Error('Zebra printer not found');
         }
         printerName = zebraPrinter.name;
       }
+      
+      // Verificar se a impressora está ocupada
+      if (this.isPrinterBusy(printerName)) {
+        const state = this.getPrinterState(printerName);
+        throw new Error(`Impressora ${printerName} está ocupada: ${state.message}`);
+      }
+
+      // Marcar impressora como ocupada
+      this.markPrinterAsBusy(printerName, jobId);
 
       const options = {
         printer: printerName,
@@ -170,47 +408,163 @@ class PrintService {
         silent: true, // Run silently without showing print dialog
       };
 
-      await print(filePath, options);
-      console.log(`Document printed successfully to ${printerName}`);
+      console.log(`[Process Job] Enviando job ${jobId} para impressora: ${printerName}`);
       
-      await fs.unlink(filePath);
+      try {
+        await print(filePath, options);
+        console.log(`[Process Job] Documento ${jobId} impresso com sucesso para ${printerName}`);
+        return jobId;
+      } catch (printError) {
+        throw printError;
+      } finally {
+        // Independentemente do resultado da impressão, marcar a impressora como livre
+        this.markPrinterAsIdle(printerName);
+      }
       
     } catch (error) {
-      console.error('Print job failed:', error);
+      console.error(`[Process Job] Falha na impressão do job ${jobId}:`, error);
       throw new Error(`Print job failed: ${error.message}`);
+    } finally {
+      // Sempre tenta limpar o arquivo temporário, mesmo em caso de erro
+      try {
+        if (await fs.pathExists(filePath)) {
+          await fs.unlink(filePath);
+          console.log(`[Process Job] Arquivo temporário do job ${jobId} removido: ${filePath}`);
+        }
+      } catch (cleanupError) {
+        console.warn(`[Process Job] Erro ao remover arquivo temporário do job ${jobId}: ${cleanupError.message}`);
+      }
     }
   }
 
   async processNextInQueue() {
+    // Evita chamadas recursivas excessivas
     if (printQueue.length === 0) {
       isPrinting = false;
       return;
     }
 
-    isPrinting = true;
-    const job = printQueue.shift();
-
+    if (isPrinting) {
+      // Se já está imprimindo, não faz nada
+      return;
+    }
+    
+    // Loop para processar a fila sem usar recursão
+    while (printQueue.length > 0) {
+      isPrinting = true;
+      
+      // Pegar o próximo trabalho, mas não remover ainda
+      const nextJob = printQueue[0];
+      
+      // Verificar se a impressora solicitada está disponível
+      const targetPrinterName = nextJob.printerName || await this.getDefaultPrinterName();
+      
+      if (this.isPrinterBusy(targetPrinterName)) {
+        // Se a impressora estiver ocupada, verificamos quando tempo já passou
+        const state = this.getPrinterState(targetPrinterName);
+        
+        // Se estiver ocupada há mais de 30 segundos, tentamos outra impressora
+        if (state.duration > 30) {
+          console.log(`[Print Queue] Impressora ${targetPrinterName} ocupada há ${state.duration}s, procurando alternativa...`);
+          
+          // Aqui você poderia implementar lógica para escolher outra impressora
+          // Por enquanto, vamos apenas agendar uma nova tentativa após alguns segundos
+          setTimeout(() => this.processNextInQueue(), 5000);
+          isPrinting = false;
+          return;
+        }
+        
+        // Se estiver ocupada há menos de 30 segundos, esperamos um pouco
+        console.log(`[Print Queue] Impressora ${targetPrinterName} ocupada há ${state.duration}s, aguardando...`);
+        setTimeout(() => this.processNextInQueue(), 2000);
+        isPrinting = false;
+        return;
+      }
+      
+      // Impressora disponível, vamos processar este trabalho
+      const job = printQueue.shift();
+      console.log(`[Print Queue] Processando job, ${printQueue.length} restantes na fila`);
+      
+      try {
+        const jobId = await this.processPrintJob(job.filePath, job.printerName);
+        job.resolve({ 
+          success: true, 
+          message: 'Document printed successfully',
+          jobId,
+          printerName: targetPrinterName
+        });
+      } catch (error) {
+        console.error(`[Print Queue] Erro ao processar job:`, error);
+        
+        // Verificar se o erro é porque a impressora está ocupada
+        if (error.message && error.message.includes('está ocupada')) {
+          // Colocamos o trabalho de volta na fila e tentamos novamente depois
+          printQueue.unshift(job);
+          console.log(`[Print Queue] Job recolocado na fila devido a impressora ocupada`);
+          
+          // Esperar antes de tentar novamente
+          setTimeout(() => this.processNextInQueue(), 3000);
+          isPrinting = false;
+          return;
+        }
+        
+        job.reject(error);
+      }
+    }
+    
+    isPrinting = false;
+    console.log(`[Print Queue] Fila de impressão vazia`);
+  }
+  
+  
+  async getDefaultPrinterName() {
     try {
-      await this.processPrintJob(job.filePath, job.printerName);
-      job.resolve({ success: true, message: 'Document printed successfully' });
+      const zebraPrinter = await this.findZebraPrinter();
+      if (zebraPrinter) {
+        return zebraPrinter.name;
+      }
+      
+      // Se não encontrar uma impressora Zebra, pega a primeira disponível
+      const printers = await this.getAvailablePrinters();
+      if (printers && printers.length > 0 && printers[0].name) {
+        return printers[0].name;
+      }
+      
+      throw new Error('Nenhuma impressora disponível');
     } catch (error) {
-      job.reject(error);
-    } finally {
-      this.processNextInQueue();
+      console.error('[Default Printer] Erro ao obter impressora padrão:', error);
+      throw error;
     }
   }
 
   async printPdf(pdfBuffer, printerName = null) {
     try {
+      console.log(`[Print PDF] Salvando PDF em arquivo temporário`);
       const filePath = await this.savePdfToTemp(pdfBuffer);
       
       return new Promise((resolve, reject) => {
-        printQueue.push({ filePath, printerName, resolve, reject });
+        // Definir um timeout para evitar promessas pendentes eternamente
+        const timeoutId = setTimeout(() => {
+          reject(new Error('Print job timeout after 120 seconds'));
+        }, 120000); // 2 minutos de timeout
+        
+        printQueue.push({ 
+          filePath, 
+          printerName, 
+          resolve: (result) => {
+            clearTimeout(timeoutId);
+            resolve(result);
+          },
+          reject: (error) => {
+            clearTimeout(timeoutId);
+            reject(error);
+          }
+        });
+        
+        console.log(`[Print Queue] Job adicionado à fila, total: ${printQueue.length}`);
         
         if (!isPrinting) {
           this.processNextInQueue();
-        } else {
-          console.log('Print job added to queue');
         }
       });
       
@@ -223,16 +577,32 @@ class PrintService {
   
   async printPdfFromUrl(pdfUrl, printerName = null) {
     try {
-      console.log(`Downloading PDF from URL: ${pdfUrl}`);
+      console.log(`[Print URL] Iniciando impressão de ${pdfUrl}`);
       const filePath = await this.downloadPdfFromUrl(pdfUrl);
       
       return new Promise((resolve, reject) => {
-        printQueue.push({ filePath, printerName, resolve, reject });
+        // Definir um timeout para evitar promessas pendentes eternamente
+        const timeoutId = setTimeout(() => {
+          reject(new Error('Print job timeout after 120 seconds'));
+        }, 120000); // 2 minutos de timeout
+        
+        printQueue.push({ 
+          filePath, 
+          printerName, 
+          resolve: (result) => {
+            clearTimeout(timeoutId);
+            resolve(result);
+          },
+          reject: (error) => {
+            clearTimeout(timeoutId);
+            reject(error);
+          }
+        });
+        
+        console.log(`[Print Queue] Job adicionado à fila de URL, total: ${printQueue.length}`);
         
         if (!isPrinting) {
           this.processNextInQueue();
-        } else {
-          console.log('Print job added to queue');
         }
       });
       
