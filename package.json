@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node src/server.js",
-    "dev": "PORT=9999 NODE_ENV=development node --watch src/server.js"
+  "start": "node src/server.js",
+  "dev": "PORT=9999 NODE_ENV=development node --watch src/server.js",
+  "agent": "AGENT_PORT=4545 node src/agent.js"
   },
   "keywords": [],
   "author": "",
