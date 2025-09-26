@@ -7,6 +7,8 @@ const app = fastify({
   logger: true
 });
 
+
+
 app.register(cors, {
   origin: '*',
 });
@@ -405,12 +407,75 @@ app.post('/print-from-url', async (request, reply) => {
   }
 });
 
+// ================= Rota de Impressão Direta via IP =================
+// Body pode conter:
+// { ip: '192.168.15.249', zpl: '^XA...^XZ' }
+// ou { ip: '192.168.15.249', pdfUrl: 'http://...' }
+// Campo opcional: type: 'zpl' | 'pdf' (inferido se ausente)
+app.post('/print-ip', async (request, reply) => {
+  try {
+    const { ip, zpl, pdfUrl, type } = request.body || {};
+    if (!ip) {
+      return reply.status(400).send({ success: false, error: 'IP da impressora é obrigatório' });
+    }
+
+    // Validação básica de IP (IPv4 simples)
+    if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(ip)) {
+      return reply.status(400).send({ success: false, error: 'Formato de IP inválido' });
+    }
+
+    const mode = type || (zpl ? 'zpl' : pdfUrl ? 'pdf' : null);
+    if (!mode) {
+      return reply.status(400).send({ success: false, error: 'Informe zpl ou pdfUrl' });
+    }
+
+    // Verificar se já existe job IP em andamento para esse host
+    if (printService.isPrinterBusy(ip)) {
+      const state = printService.getPrinterState(ip);
+      return reply.status(409).send({
+        success: false,
+        error: 'Printer IP busy',
+        state,
+        message: `Impressora IP ${ip} ocupada: ${state.message}`
+      });
+    }
+
+    let result;
+    if (mode === 'zpl') {
+      if (!zpl) {
+        return reply.status(400).send({ success: false, error: 'Campo zpl é obrigatório para type=zpl' });
+      }
+      result = await printService.printZplToIp(zpl, ip);
+    } else if (mode === 'pdf') {
+      if (!pdfUrl) {
+        return reply.status(400).send({ success: false, error: 'Campo pdfUrl é obrigatório para type=pdf' });
+      }
+      try { new URL(pdfUrl); } catch { return reply.status(400).send({ success: false, error: 'pdfUrl inválida' }); }
+      result = await printService.printPdfFromUrlToIp(pdfUrl, ip);
+    } else {
+      return reply.status(400).send({ success: false, error: 'Tipo desconhecido' });
+    }
+
+    return {
+      success: true,
+      message: 'Job de impressão IP enfileirado',
+      result,
+      ip,
+      mode
+    };
+  } catch (error) {
+    request.log.error('Erro em /print-ip:', error);
+    return reply.status(500).send({ success: false, error: 'Falha ao processar impressão por IP', details: error.message });
+  }
+});
+
 // Endpoint de atualização de etiqueta removido, agora usando o endpoint AWS
 
 const start = async () => {
   try {
-    await app.listen({ port: 3333, host: '0.0.0.0' });
-    console.log('Server running at http://0.0.0.0:3333');
+    const port = parseInt(process.env.PORT, 10) || 3333;
+    await app.listen({ port, host: '0.0.0.0' });
+    console.log(`Server running at http://0.0.0.0:${port}`);
   } catch (err) {
     app.log.error(err);
     process.exit(1);

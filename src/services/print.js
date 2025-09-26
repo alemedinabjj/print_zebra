@@ -5,6 +5,7 @@ import path from 'path';
 import os from 'os';
 import https from 'https';
 import http from 'http';
+import net from 'net';
 
 const { print, getPrinters } = pdfToPrinter;
 
@@ -456,58 +457,75 @@ class PrintService {
       // Pegar o próximo trabalho, mas não remover ainda
       const nextJob = printQueue[0];
       
-      // Verificar se a impressora solicitada está disponível
+      // Verificar se é um job de impressão direta por IP
+      if (nextJob.directIp) {
+        const targetKey = nextJob.ip; // usar IP como chave de estado
+        if (this.isPrinterBusy(targetKey)) {
+          const state = this.getPrinterState(targetKey);
+          if (state.duration > 30) {
+            console.log(`[Print Queue] Impressora IP ${targetKey} ocupada há ${state.duration}s, tentando novamente em 5s...`);
+            setTimeout(() => this.processNextInQueue(), 5000);
+            isPrinting = false;
+            return;
+          }
+          console.log(`[Print Queue] Impressora IP ${targetKey} ocupada há ${state.duration}s, aguardando 2s...`);
+          setTimeout(() => this.processNextInQueue(), 2000);
+          isPrinting = false;
+          return;
+        }
+        // Processar job IP
+        const job = printQueue.shift();
+        console.log(`[Print Queue] Processando job IP (${job.ip}), ${printQueue.length} restantes na fila`);
+        try {
+          const jobId = await this.processIpPrintJob(job);
+          job.resolve({
+            success: true,
+            message: 'Document sent directly to printer IP successfully',
+            jobId,
+            printerIp: job.ip,
+            mode: job.zpl ? 'zpl' : 'raw'
+          });
+        } catch (error) {
+          console.error(`[Print Queue] Erro ao processar job IP:`, error);
+          job.reject(error);
+        }
+        continue; // seguir para próximo se houver
+      }
+
+      // Job normal baseado em nome de impressora
       const targetPrinterName = nextJob.printerName || await this.getDefaultPrinterName();
-      
       if (this.isPrinterBusy(targetPrinterName)) {
-        // Se a impressora estiver ocupada, verificamos quando tempo já passou
         const state = this.getPrinterState(targetPrinterName);
-        
-        // Se estiver ocupada há mais de 30 segundos, tentamos outra impressora
         if (state.duration > 30) {
           console.log(`[Print Queue] Impressora ${targetPrinterName} ocupada há ${state.duration}s, procurando alternativa...`);
-          
-          // Aqui você poderia implementar lógica para escolher outra impressora
-          // Por enquanto, vamos apenas agendar uma nova tentativa após alguns segundos
           setTimeout(() => this.processNextInQueue(), 5000);
           isPrinting = false;
           return;
         }
-        
-        // Se estiver ocupada há menos de 30 segundos, esperamos um pouco
         console.log(`[Print Queue] Impressora ${targetPrinterName} ocupada há ${state.duration}s, aguardando...`);
         setTimeout(() => this.processNextInQueue(), 2000);
         isPrinting = false;
         return;
       }
-      
-      // Impressora disponível, vamos processar este trabalho
       const job = printQueue.shift();
       console.log(`[Print Queue] Processando job, ${printQueue.length} restantes na fila`);
-      
       try {
         const jobId = await this.processPrintJob(job.filePath, job.printerName);
-        job.resolve({ 
-          success: true, 
+        job.resolve({
+          success: true,
           message: 'Document printed successfully',
           jobId,
           printerName: targetPrinterName
         });
       } catch (error) {
         console.error(`[Print Queue] Erro ao processar job:`, error);
-        
-        // Verificar se o erro é porque a impressora está ocupada
         if (error.message && error.message.includes('está ocupada')) {
-          // Colocamos o trabalho de volta na fila e tentamos novamente depois
           printQueue.unshift(job);
           console.log(`[Print Queue] Job recolocado na fila devido a impressora ocupada`);
-          
-          // Esperar antes de tentar novamente
           setTimeout(() => this.processNextInQueue(), 3000);
           isPrinting = false;
           return;
         }
-        
         job.reject(error);
       }
     }
@@ -609,6 +627,100 @@ class PrintService {
     } catch (error) {
       console.error('Error printing PDF from URL:', error);
       throw new Error(`Failed to print PDF from URL: ${error.message}`);
+    }
+  }
+
+  // ===================== Impressão Direta via IP =====================
+  async processIpPrintJob(job) {
+    const jobId = `ip_job_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+    const key = job.ip;
+    this.markPrinterAsBusy(key, jobId);
+    try {
+      let buffer;
+      if (job.zpl) {
+        buffer = Buffer.from(job.zpl, 'utf8');
+      } else if (job.filePath) {
+        if (!await fs.pathExists(job.filePath)) {
+          throw new Error(`Arquivo não encontrado para envio: ${job.filePath}`);
+        }
+        buffer = await fs.readFile(job.filePath);
+      } else if (job.buffer) {
+        buffer = job.buffer;
+      } else {
+        throw new Error('Nenhum conteúdo para impressão IP');
+      }
+
+      await this.sendRawBufferToIp(buffer, job.ip, { isZpl: !!job.zpl });
+      return jobId;
+    } finally {
+      this.markPrinterAsIdle(key);
+      // limpar arquivo temporário se houver
+      try {
+        if (job.filePath && await fs.pathExists(job.filePath)) {
+          await fs.unlink(job.filePath);
+        }
+      } catch (e) {
+        console.warn(`[IP Print] Falha ao remover arquivo temporário: ${e.message}`);
+      }
+    }
+  }
+
+  async sendRawBufferToIp(buffer, ip, { isZpl = false } = {}) {
+    return new Promise((resolve, reject) => {
+      const socket = net.createConnection({ host: ip, port: 9100 }, () => {
+        console.log(`[IP Print] Conexão estabelecida com ${ip}:9100 (tamanho ${buffer.length} bytes, tipo=${isZpl ? 'ZPL' : 'RAW'})`);
+        socket.write(buffer);
+        socket.end();
+      });
+      socket.setTimeout(30000);
+      socket.on('timeout', () => {
+        socket.destroy();
+        reject(new Error('Timeout ao enviar dados para a impressora IP'));
+      });
+      socket.on('error', (err) => {
+        reject(new Error(`Erro de socket: ${err.message}`));
+      });
+      socket.on('close', () => {
+        console.log('[IP Print] Conexão encerrada');
+        resolve(true);
+      });
+    });
+  }
+
+  async printZplToIp(zplString, ip) {
+    return new Promise((resolve, reject) => {
+      const timeoutId = setTimeout(() => reject(new Error('Print job timeout after 120 seconds')), 120000);
+      printQueue.push({
+        directIp: true,
+        ip,
+        zpl: zplString,
+        resolve: (r) => { clearTimeout(timeoutId); resolve(r); },
+        reject: (e) => { clearTimeout(timeoutId); reject(e); }
+      });
+      console.log(`[Print Queue] Job ZPL para IP ${ip} adicionado. Total fila: ${printQueue.length}`);
+      if (!isPrinting) this.processNextInQueue();
+    });
+  }
+
+  async printPdfFromUrlToIp(pdfUrl, ip) {
+    try {
+      console.log(`[IP PDF] Download e envio de PDF para IP ${ip}: ${pdfUrl}`);
+      const filePath = await this.downloadPdfFromUrl(pdfUrl);
+      return new Promise((resolve, reject) => {
+        const timeoutId = setTimeout(() => reject(new Error('Print job timeout after 120 seconds')), 120000);
+        printQueue.push({
+          directIp: true,
+            ip,
+          filePath,
+          resolve: (r) => { clearTimeout(timeoutId); resolve(r); },
+          reject: (e) => { clearTimeout(timeoutId); reject(e); }
+        });
+        console.log(`[Print Queue] Job PDF->IP ${ip} adicionado. Total fila: ${printQueue.length}`);
+        if (!isPrinting) this.processNextInQueue();
+      });
+    } catch (error) {
+      console.error('[IP PDF] Erro ao preparar PDF para IP:', error);
+      throw new Error(`Falha ao preparar PDF para IP: ${error.message}`);
     }
   }
 }

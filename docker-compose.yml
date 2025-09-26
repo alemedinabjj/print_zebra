@@ -1,0 +1,23 @@
+version: '3.9'
+services:
+  print-zebra:
+    build: .
+    container_name: print-zebra
+    environment:
+      - NODE_ENV=production
+      - PORT=9999
+    ports:
+      - "9999:9999"
+    restart: unless-stopped
+    # Se precisar acessar dispositivos USB locais para impressoras instaladas diretamente:
+    # devices:
+    #   - "/dev/usb/lp0:/dev/usb/lp0"
+    # volumes:
+    #   - ./logs:/app/logs
+    #   - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9999/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
