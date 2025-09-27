@@ -110,7 +110,18 @@ app.post('/print-zpl-ip', async (request, reply) => {
 // POST /print-pdf-shared
 // Body: { pdfUrl: string, printerName?: string, sharePath?: string }
 // Faz download e envia para spool (USB compartilhada / CUPS)
+// Autenticação básica opcional para /print-pdf-shared via header x-api-key
+// Defina PRINT_API_KEY no ambiente para ativar. Se não definido, rota permanece aberta.
 app.post('/print-pdf-shared', async (request, reply) => {
+  if (process.env.PRINT_API_KEY) {
+    const provided = request.headers['x-api-key'];
+    if (!provided) {
+      return reply.status(401).send({ success: false, error: 'missing_api_key', message: 'Header x-api-key ausente' });
+    }
+    if (provided !== process.env.PRINT_API_KEY) {
+      return reply.status(403).send({ success: false, error: 'invalid_api_key', message: 'x-api-key inválida' });
+    }
+  }
   try {
     const { pdfUrl, printerName, sharePath } = request.body || {};
     if (!pdfUrl) {
