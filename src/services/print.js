@@ -650,7 +650,7 @@ class PrintService {
         throw new Error('Nenhum conteúdo para impressão IP');
       }
 
-      await this.sendRawBufferToIp(buffer, job.ip, { isZpl: !!job.zpl });
+  await this.sendRawBufferToIp(buffer, job.ip, { isZpl: !!job.zpl, port: job.port });
       return jobId;
     } finally {
       this.markPrinterAsIdle(key);
@@ -665,17 +665,18 @@ class PrintService {
     }
   }
 
-  async sendRawBufferToIp(buffer, ip, { isZpl = false } = {}) {
+  async sendRawBufferToIp(buffer, ip, { isZpl = false, port = null } = {}) {
+    const rawPort = port || parseInt(process.env.PRINTER_RAW_PORT, 10) || 9100;
     return new Promise((resolve, reject) => {
-      const socket = net.createConnection({ host: ip, port: 9100 }, () => {
-        console.log(`[IP Print] Conexão estabelecida com ${ip}:9100 (tamanho ${buffer.length} bytes, tipo=${isZpl ? 'ZPL' : 'RAW'})`);
+      const socket = net.createConnection({ host: ip, port: rawPort }, () => {
+        console.log(`[IP Print] Conexão estabelecida com ${ip}:${rawPort} (tamanho ${buffer.length} bytes, tipo=${isZpl ? 'ZPL' : 'RAW'})`);
         socket.write(buffer);
         socket.end();
       });
       socket.setTimeout(30000);
       socket.on('timeout', () => {
         socket.destroy();
-        reject(new Error('Timeout ao enviar dados para a impressora IP'));
+        reject(new Error(`Timeout ao enviar dados para a impressora IP (${ip}:${rawPort})`));
       });
       socket.on('error', (err) => {
         reject(new Error(`Erro de socket: ${err.message}`));
@@ -687,12 +688,13 @@ class PrintService {
     });
   }
 
-  async printZplToIp(zplString, ip) {
+  async printZplToIp(zplString, ip, port = null) {
     return new Promise((resolve, reject) => {
       const timeoutId = setTimeout(() => reject(new Error('Print job timeout after 120 seconds')), 120000);
       printQueue.push({
         directIp: true,
         ip,
+        port,
         zpl: zplString,
         resolve: (r) => { clearTimeout(timeoutId); resolve(r); },
         reject: (e) => { clearTimeout(timeoutId); reject(e); }
@@ -702,7 +704,7 @@ class PrintService {
     });
   }
 
-  async printPdfFromUrlToIp(pdfUrl, ip) {
+  async printPdfFromUrlToIp(pdfUrl, ip, port = null) {
     try {
       console.log(`[IP PDF] Download e envio de PDF para IP ${ip}: ${pdfUrl}`);
       const filePath = await this.downloadPdfFromUrl(pdfUrl);
@@ -710,7 +712,8 @@ class PrintService {
         const timeoutId = setTimeout(() => reject(new Error('Print job timeout after 120 seconds')), 120000);
         printQueue.push({
           directIp: true,
-            ip,
+          ip,
+          port,
           filePath,
           resolve: (r) => { clearTimeout(timeoutId); resolve(r); },
           reject: (e) => { clearTimeout(timeoutId); reject(e); }

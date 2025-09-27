@@ -17,12 +17,13 @@ app.addContentTypeParser('application/json', { parseAs: 'string' }, function (re
 app.get('/health', async () => ({ status: 'ok', role: 'local-print-agent', timestamp: new Date().toISOString() }));
 
 // POST /print-from-url-ip
-// Body: { pdfUrl: string, ip?: string }
-// Se ip ausente, usa PRINTER_IP do ambiente.
+// Body: { pdfUrl: string, ip?: string, port?: number }
+// Se ip ausente, usa PRINTER_IP do ambiente. Se port ausente, usa PRINTER_RAW_PORT ou 9100
 app.post('/print-from-url-ip', async (request, reply) => {
   try {
-    const { pdfUrl, ip } = request.body || {};
+    const { pdfUrl, ip, port } = request.body || {};
     const targetIp = ip || process.env.PRINTER_IP;
+    let targetPort = port !== undefined ? parseInt(port, 10) : null;
 
     if (!pdfUrl) {
       return reply.status(400).send({ success: false, error: 'pdfUrl é obrigatório' });
@@ -35,14 +36,17 @@ app.post('/print-from-url-ip', async (request, reply) => {
     if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(targetIp)) {
       return reply.status(400).send({ success: false, error: 'Formato de IP inválido' });
     }
+    if (targetPort !== null && (isNaN(targetPort) || targetPort < 1 || targetPort > 65535)) {
+      return reply.status(400).send({ success: false, error: 'Port inválida (1-65535)' });
+    }
 
     if (printService.isPrinterBusy(targetIp)) {
       const state = printService.getPrinterState(targetIp);
       return reply.status(409).send({ success: false, error: 'Printer busy', state });
     }
 
-    const result = await printService.printPdfFromUrlToIp(pdfUrl, targetIp);
-    return { success: true, message: 'Job enfileirado (PDF -> IP)', result, ip: targetIp };
+    const result = await printService.printPdfFromUrlToIp(pdfUrl, targetIp, targetPort);
+    return { success: true, message: 'Job enfileirado (PDF -> IP)', result, ip: targetIp, port: targetPort || parseInt(process.env.PRINTER_RAW_PORT, 10) || 9100 };
   } catch (error) {
     request.log.error('Erro em /print-from-url-ip:', error);
     return reply.status(500).send({ success: false, error: 'Falha ao processar impressão', details: error.message });
@@ -50,11 +54,12 @@ app.post('/print-from-url-ip', async (request, reply) => {
 });
 
 // POST /print-zpl-ip
-// Body: { zpl: string, ip?: string }
+// Body: { zpl: string, ip?: string, port?: number }
 app.post('/print-zpl-ip', async (request, reply) => {
   try {
-    const { zpl, ip } = request.body || {};
+    const { zpl, ip, port } = request.body || {};
     const targetIp = ip || process.env.PRINTER_IP;
+    let targetPort = port !== undefined ? parseInt(port, 10) : null;
     if (!zpl) {
       return reply.status(400).send({ success: false, error: 'zpl é obrigatório' });
     }
@@ -64,12 +69,15 @@ app.post('/print-zpl-ip', async (request, reply) => {
     if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(targetIp)) {
       return reply.status(400).send({ success: false, error: 'Formato de IP inválido' });
     }
+    if (targetPort !== null && (isNaN(targetPort) || targetPort < 1 || targetPort > 65535)) {
+      return reply.status(400).send({ success: false, error: 'Port inválida (1-65535)' });
+    }
     if (printService.isPrinterBusy(targetIp)) {
       const state = printService.getPrinterState(targetIp);
       return reply.status(409).send({ success: false, error: 'Printer busy', state });
     }
-    const result = await printService.printZplToIp(zpl, targetIp);
-    return { success: true, message: 'Job enfileirado (ZPL -> IP)', result, ip: targetIp };
+    const result = await printService.printZplToIp(zpl, targetIp, targetPort);
+    return { success: true, message: 'Job enfileirado (ZPL -> IP)', result, ip: targetIp, port: targetPort || parseInt(process.env.PRINTER_RAW_PORT, 10) || 9100 };
   } catch (error) {
     request.log.error('Erro em /print-zpl-ip:', error);
     return reply.status(500).send({ success: false, error: 'Falha ao processar ZPL', details: error.message });
