@@ -16,6 +16,17 @@ app.addContentTypeParser('application/json', { parseAs: 'string' }, function (re
 
 app.get('/health', async () => ({ status: 'ok', role: 'local-print-agent', timestamp: new Date().toISOString() }));
 
+// Lista impressoras detectadas (combina pdf-to-printer ou fallback powershell)
+app.get('/printers', async (request, reply) => {
+  try {
+    const printers = await printService.getAvailablePrinters();
+    return { success: true, count: printers.length, printers };
+  } catch (err) {
+    request.log.error('Erro em /printers:', err);
+    return reply.status(500).send({ success: false, error: 'Falha ao listar impressoras', details: err.message });
+  }
+});
+
 // POST /print-from-url-ip
 // Body: { pdfUrl: string, ip?: string, port?: number, printerName?: string, sharePath?: string }
 // Se ip presente => envia via socket IP; caso contrário tenta spool usando printerName/sharePath (PDF -> teremos que converter? Aqui mantemos IP only; spool PDF já existe via rotas locais originais se necessário)

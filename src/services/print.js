@@ -203,7 +203,15 @@ class PrintService {
     }
     try {
       const printers = await this.getAvailablePrinters();
-      const found = printers.find(p => p && typeof p.name === 'string' && p.name.toLowerCase() === printerName.toLowerCase());
+      const targetNorm = printerName.toLowerCase().trim();
+      const found = printers.find(p => {
+        if (!p) return false;
+        const n = (p.name || p.Name || '').toLowerCase().trim();
+        if (n === targetNorm) return true;
+        // matching parcial se for claramente a zebra única
+        if (n.includes(targetNorm) || targetNorm.includes(n)) return true;
+        return false;
+      });
       if (found) {
         // Inicializa estado como idle sem jobs anteriores
         printerStates.set(printerName, {
@@ -219,7 +227,7 @@ class PrintService {
         });
         return this.getPrinterState(printerName);
       }
-      return { status: 'unknown', message: 'Impressora não encontrada localmente' };
+      return { status: 'unknown', message: 'Impressora não encontrada localmente (verifique nome exato com /printers)' };
     } catch (err) {
       return { status: 'unknown', message: `Falha ao detectar impressora: ${err.message}` };
     }
@@ -237,23 +245,45 @@ class PrintService {
 
   async getAvailablePrinters() {
     try {
-      const printers = await getPrinters();
-      
-      if (!printers || !Array.isArray(printers)) {
-        console.warn('getPrinters() não retornou um array válido:', printers);
-        return [];
+      let printers = await getPrinters();
+      if (!printers || !Array.isArray(printers) || printers.length === 0) {
+        throw new Error('Lista vazia ou inválida');
       }
-      
-      console.log(`Impressoras encontradas: ${printers.length}`);
-      printers.forEach((printer, index) => {
-        console.log(`Impressora ${index + 1}: ${printer?.name || 'Nome não disponível'}`);
-      });
-      
+      this._logPrinters(printers, 'pdf-to-printer');
       return printers;
     } catch (error) {
-      console.error('Erro ao obter impressoras disponíveis:', error);
+      console.error('Erro ao obter impressoras disponíveis (getPrinters):', error);
+      // Fallback Windows com PowerShell
+      if (process.platform === 'win32') {
+        try {
+          const psCommand = 'powershell -NoProfile -Command "Get-Printer | Select-Object -Property Name,DriverName,Shared,ShareName | ConvertTo-Json"';
+          const { stdout } = await this.execCommand(psCommand, { timeout: 15000 });
+          let parsed = [];
+          try { parsed = JSON.parse(stdout); } catch (e) { console.warn('Falha ao parsear JSON PowerShell:', e.message); }
+          if (parsed && !Array.isArray(parsed)) parsed = [parsed];
+          const mapped = (parsed || []).filter(p => p && p.Name).map(p => ({
+            name: p.Name,
+            driver: p.DriverName,
+            shared: p.Shared,
+            shareName: p.ShareName,
+            source: 'powershell'
+          }));
+          this._logPrinters(mapped, 'powershell');
+          return mapped;
+        } catch (psErr) {
+          console.error('Fallback PowerShell falhou:', psErr.message);
+        }
+      }
       return [];
     }
+  }
+
+  _logPrinters(printers, source) {
+    console.log(`Impressoras encontradas (${source}): ${printers.length}`);
+    printers.forEach((printer, index) => {
+      const name = printer?.name || printer?.Name || 'Nome não disponível';
+      console.log(`  [${index + 1}] ${name}`);
+    });
   }
 
   
