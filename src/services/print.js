@@ -195,6 +195,35 @@ class PrintService {
       message: 'Impressora disponível'
     };
   }
+
+  async getOrInitPrinterState(printerName) {
+    // Se já existe, reutiliza
+    if (printerStates.has(printerName)) {
+      return this.getPrinterState(printerName);
+    }
+    try {
+      const printers = await this.getAvailablePrinters();
+      const found = printers.find(p => p && typeof p.name === 'string' && p.name.toLowerCase() === printerName.toLowerCase());
+      if (found) {
+        // Inicializa estado como idle sem jobs anteriores
+        printerStates.set(printerName, {
+          status: 'idle',
+          jobId: null,
+          jobStartTime: null,
+          lastResetTime: Date.now(),
+          lastSuccessTime: null,
+          lastFailureTime: null,
+          lastError: null,
+          lastJobId: null,
+          lastJobDuration: null
+        });
+        return this.getPrinterState(printerName);
+      }
+      return { status: 'unknown', message: 'Impressora não encontrada localmente' };
+    } catch (err) {
+      return { status: 'unknown', message: `Falha ao detectar impressora: ${err.message}` };
+    }
+  }
   
   
   getAllPrinterStates() {

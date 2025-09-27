@@ -130,7 +130,12 @@ app.get('/printer-ip-status', async (request, reply) => {
       return { success: true, states: printService.getAllPrinterStates() };
     }
     const key = ip || printerName || sharePath;
-    return { success: true, key, state: printService.getPrinterState(key) };
+    let state = printService.getPrinterState(key);
+    if (state.status === 'unknown' && printerName) {
+      // tentar detectar e inicializar
+      state = await printService.getOrInitPrinterState(printerName);
+    }
+    return { success: true, key, state };
   } catch (error) {
     request.log.error('Erro em /printer-ip-status:', error);
     return reply.status(500).send({ success: false, error: 'Falha ao obter estado', details: error.message });
