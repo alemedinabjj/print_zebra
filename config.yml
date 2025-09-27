@@ -1,0 +1,7 @@
+tunnel: zebra-print
+credentials-file: C:\\Users\\Innovation\\.cloudflared\\<UUID>.json
+
+ingress:
+  - hostname: zebra-print.impress.com
+    service: http://localhost:4545
+  - service: http_status:404
