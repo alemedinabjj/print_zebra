@@ -96,6 +96,32 @@ app.post('/print-zpl-ip', async (request, reply) => {
   }
 });
 
+// POST /print-pdf-shared
+// Body: { pdfUrl: string, printerName?: string, sharePath?: string }
+// Faz download e envia para spool (USB compartilhada / CUPS)
+app.post('/print-pdf-shared', async (request, reply) => {
+  try {
+    const { pdfUrl, printerName, sharePath } = request.body || {};
+    if (!pdfUrl) {
+      return reply.status(400).send({ success: false, error: 'pdfUrl é obrigatório' });
+    }
+    try { new URL(pdfUrl); } catch { return reply.status(400).send({ success: false, error: 'pdfUrl inválida' }); }
+    if (!printerName && !sharePath) {
+      return reply.status(400).send({ success: false, error: 'Forneça printerName ou sharePath' });
+    }
+    const key = printerName || sharePath;
+    if (printService.isPrinterBusy(key)) {
+      const state = printService.getPrinterState(key);
+      return reply.status(409).send({ success: false, error: 'Printer busy', state });
+    }
+    const result = await printService.printPdfSharedFromUrl(pdfUrl, { printerName, sharePath });
+    return { success: true, mode: 'pdf-shared', message: 'Job enfileirado (PDF -> Spool)', result, printerName, sharePath };
+  } catch (error) {
+    request.log.error('Erro em /print-pdf-shared:', error);
+    return reply.status(500).send({ success: false, error: 'Falha ao processar PDF compartilhado', details: error.message });
+  }
+});
+
 // Simple status consulta estados registrados (pelo IP)
 app.get('/printer-ip-status', async (request, reply) => {
   try {

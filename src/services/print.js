@@ -536,6 +536,34 @@ class PrintService {
         continue;
       }
 
+      // Verificar se é um job de PDF via spool (USB compartilhada / CUPS)
+      if (nextJob.pdfShared) {
+        const key = nextJob.printerName || nextJob.sharePath || 'shared-unknown';
+        if (this.isPrinterBusy(key)) {
+          const state = this.getPrinterState(key);
+          if (state.duration > 60) {
+            console.log(`[Print Queue] Impressora compartilhada ${key} (PDF) ocupada há ${state.duration}s, tentando em 10s...`);
+            setTimeout(() => this.processNextInQueue(), 10000);
+            isPrinting = false;
+            return;
+          }
+          console.log(`[Print Queue] Impressora compartilhada ${key} (PDF) ocupada há ${state.duration}s, aguardando 3s...`);
+            setTimeout(() => this.processNextInQueue(), 3000);
+            isPrinting = false;
+            return;
+        }
+        const job = printQueue.shift();
+        console.log(`[Print Queue] Processando job PDF compartilhado (${key}), ${printQueue.length} restantes`);
+        try {
+          const jobId = await this.processSharedPdfJob(job);
+          job.resolve({ success: true, message: 'PDF enviado via spool', jobId, printerKey: key, mode: 'pdf-shared' });
+        } catch (error) {
+          console.error('[Print Queue] Erro em job PDF compartilhado:', error);
+          job.reject(error);
+        }
+        continue;
+      }
+
       // Job normal baseado em nome de impressora
       const targetPrinterName = nextJob.printerName || await this.getDefaultPrinterName();
       if (this.isPrinterBusy(targetPrinterName)) {
@@ -900,6 +928,81 @@ class PrintService {
         reject: (e) => { clearTimeout(timeoutId); reject(e); }
       });
       console.log(`[Print Queue] Job ZPL compartilhado adicionado. Total fila: ${printQueue.length}`);
+      if (!isPrinting) this.processNextInQueue();
+    });
+  }
+
+  // ===================== Impressão PDF via Spool (USB compartilhada / CUPS) =====================
+  async processSharedPdfJob(job) {
+    const jobId = `spool_pdf_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+    const key = job.printerName || job.sharePath || 'shared-unknown';
+    this.markPrinterAsBusy(key, jobId);
+    try {
+      const platform = process.platform;
+      if (!await fs.pathExists(job.filePath)) {
+        throw new Error('Arquivo PDF não encontrado para spool');
+      }
+      if (platform === 'win32') {
+        let command;
+        if (job.sharePath) {
+          let share = job.sharePath;
+            if (!share.startsWith('\\\\')) {
+              share = share.replace(/^\\/, '');
+              share = `\\\\${share}`;
+            }
+          // Para PDF a cópia raw pode não ser interpretada; então usamos printui/spooler via powershell.
+          // Estratégia: usar "Start-Process -FilePath <pdf> -Verb PrintTo -ArgumentList printerName" se printerName existir.
+          if (job.printerName) {
+            const escapedPrinter = job.printerName.replace(/"/g, '\"');
+            command = `powershell -Command "Start-Process -FilePath '${job.filePath}' -Verb PrintTo -ArgumentList \"'${escapedPrinter}'\" -WindowStyle Hidden"`;
+          } else {
+            // fallback: tentativa com rundll32 (menos confiável)
+            command = `rundll32 printui.dll,PrintUIEntry /y`;
+            console.warn('[Spool PDF] Nenhum printerName fornecido; considere enviar printerName para melhor confiabilidade.');
+          }
+        } else if (job.printerName) {
+          const escapedPrinter = job.printerName.replace(/"/g, '\"');
+          command = `powershell -Command "Start-Process -FilePath '${job.filePath}' -Verb PrintTo -ArgumentList \"'${escapedPrinter}'\" -WindowStyle Hidden"`;
+        } else {
+          throw new Error('Forneça printerName ou sharePath para spool PDF em Windows');
+        }
+        await this.execCommand(command, { timeout: 60000 });
+      } else {
+        // Linux/macOS via CUPS
+        if (!job.printerName) {
+          throw new Error('printerName é obrigatório para PDF via spool em sistemas não Windows');
+        }
+        const escaped = job.printerName.replace(/"/g, '\"');
+        const command = `lp -d "${escaped}" "${job.filePath}"`;
+        await this.execCommand(command, { timeout: 60000 });
+      }
+      this.markPrinterAsIdle(key, { success: true });
+      return jobId;
+    } catch (err) {
+      this.markPrinterAsIdle(key, { success: false, error: err });
+      throw err;
+    } finally {
+      try { if (await fs.pathExists(job.filePath)) await fs.unlink(job.filePath); } catch (e) { console.warn(`[Spool PDF] Falha ao remover temp: ${e.message}`); }
+    }
+  }
+
+  async printPdfSharedFromUrl(pdfUrl, { printerName = null, sharePath = null } = {}) {
+    if (!printerName && !sharePath) {
+      throw new Error('É necessário fornecer printerName ou sharePath para PDF via spool');
+    }
+    console.log(`[PDF Spool] Download PDF para spool compartilhado: ${pdfUrl}`);
+    const filePath = await this.downloadPdfFromUrl(pdfUrl);
+    return new Promise((resolve, reject) => {
+      const timeoutId = setTimeout(() => reject(new Error('Print job timeout after 180 seconds')), 180000);
+      printQueue.push({
+        pdfShared: true,
+        printerName,
+        sharePath,
+        filePath,
+        resolve: (r) => { clearTimeout(timeoutId); resolve(r); },
+        reject: (e) => { clearTimeout(timeoutId); reject(e); }
+      });
+      console.log(`[Print Queue] Job PDF compartilhado adicionado. Total fila: ${printQueue.length}`);
       if (!isPrinting) this.processNextInQueue();
     });
   }
