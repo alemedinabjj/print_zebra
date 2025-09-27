@@ -1002,30 +1002,22 @@ class PrintService {
         throw new Error('Arquivo PDF não encontrado para spool');
       }
       if (platform === 'win32') {
-        let command;
-        if (job.sharePath) {
-          let share = job.sharePath;
-            if (!share.startsWith('\\\\')) {
-              share = share.replace(/^\\/, '');
-              share = `\\\\${share}`;
-            }
-          // Para PDF a cópia raw pode não ser interpretada; então usamos printui/spooler via powershell.
-          // Estratégia: usar "Start-Process -FilePath <pdf> -Verb PrintTo -ArgumentList printerName" se printerName existir.
-          if (job.printerName) {
-            const escapedPrinter = job.printerName.replace(/"/g, '\"');
-            command = `powershell -Command "Start-Process -FilePath '${job.filePath}' -Verb PrintTo -ArgumentList \"'${escapedPrinter}'\" -WindowStyle Hidden"`;
-          } else {
-            // fallback: tentativa com rundll32 (menos confiável)
-            command = `rundll32 printui.dll,PrintUIEntry /y`;
-            console.warn('[Spool PDF] Nenhum printerName fornecido; considere enviar printerName para melhor confiabilidade.');
-          }
-        } else if (job.printerName) {
-          const escapedPrinter = job.printerName.replace(/"/g, '\"');
-          command = `powershell -Command "Start-Process -FilePath '${job.filePath}' -Verb PrintTo -ArgumentList \"'${escapedPrinter}'\" -WindowStyle Hidden"`;
-        } else {
-          throw new Error('Forneça printerName ou sharePath para spool PDF em Windows');
+        // Uso direto do pdf-to-printer (que já converte / envia para o spooler) evita depender de associações de aplicativo.
+        let targetPrinter = job.printerName;
+        if (!targetPrinter && job.sharePath) {
+          // Tentar derivar nome da impressora a partir do share (ex: \\HOST\Nome Compartilhada)
+          const parts = job.sharePath.split(/\\+/).filter(Boolean);
+          targetPrinter = parts[parts.length - 1];
+          console.log(`[PDF Spool] Derivado printerName='${targetPrinter}' de sharePath '${job.sharePath}'`);
         }
-        await this.execCommand(command, { timeout: 60000 });
+        if (!targetPrinter) {
+          throw new Error('Não foi possível determinar printerName para PDF no Windows (forneça printerName).');
+        }
+        try {
+          await print(job.filePath, { printer: targetPrinter, silent: true, scale: 'noscale' });
+        } catch (e) {
+          throw new Error(`Falha ao imprimir PDF via pdf-to-printer: ${e.message}`);
+        }
       } else {
         // Linux/macOS via CUPS
         if (!job.printerName) {
