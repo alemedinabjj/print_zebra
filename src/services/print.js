@@ -13,7 +13,7 @@ const { print, getPrinters } = pdfToPrinter;
 let isPrinting = false;
 const printQueue = [];
 
-const printerStates = new Map(); // Map<printerName, {status: 'idle'|'busy', jobStartTime: Date, jobId: string}>
+const printerStates = new Map(); // Map<printerName, {status: 'idle'|'busy', jobStartTime: Date, jobId: string, lastSuccessTime?: number, lastFailureTime?: number, lastError?: string, lastJobId?: string, lastJobDuration?: number}>
 
 const MAX_CONCURRENT_DOWNLOADS = 2;
 let activeDownloads = 0;
@@ -116,37 +116,49 @@ class PrintService {
   
   
   markPrinterAsBusy(printerName, jobId) {
+    const prev = printerStates.get(printerName) || {};
     printerStates.set(printerName, {
       status: 'busy',
       jobId,
       jobStartTime: Date.now(),
-      lastResetTime: null
+      lastResetTime: null,
+      lastSuccessTime: prev.lastSuccessTime,
+      lastFailureTime: prev.lastFailureTime,
+      lastError: prev.lastError,
+      lastJobId: prev.lastJobId,
+      lastJobDuration: prev.lastJobDuration
     });
     
     console.log(`[Printer State] Impressora ${printerName} agora está ocupada com o job ${jobId}`);
   }
   
   
-  markPrinterAsIdle(printerName) {
+  markPrinterAsIdle(printerName, { success = true, error = null } = {}) {
+    const now = Date.now();
     if (printerStates.has(printerName)) {
       const oldState = printerStates.get(printerName);
-      
+      const duration = oldState.jobStartTime ? now - oldState.jobStartTime : null;
       printerStates.set(printerName, {
         status: 'idle',
         jobId: null,
         jobStartTime: null,
-        lastResetTime: Date.now(),
+        lastResetTime: now,
         lastJobId: oldState.jobId,
-        lastJobDuration: Date.now() - oldState.jobStartTime
+        lastJobDuration: duration,
+        lastSuccessTime: success ? now : oldState.lastSuccessTime,
+        lastFailureTime: !success ? now : oldState.lastFailureTime,
+        lastError: !success && error ? (error.message || String(error)) : (success ? null : oldState.lastError)
       });
-      
-      console.log(`[Printer State] Impressora ${printerName} agora está livre (job anterior: ${oldState.jobId}, duração: ${(Date.now() - oldState.jobStartTime) / 1000}s)`);
+      console.log(`[Printer State] Impressora ${printerName} agora está livre (job anterior: ${oldState.jobId}, duração: ${duration ? duration / 1000 : '0'}s, sucesso=${success})`);
     } else {
       printerStates.set(printerName, {
         status: 'idle',
         jobId: null,
         jobStartTime: null,
-        lastResetTime: Date.now()
+        lastResetTime: now,
+        lastSuccessTime: success ? now : undefined,
+        lastFailureTime: !success ? now : undefined,
+        lastError: !success && error ? (error.message || String(error)) : undefined
       });
     }
   }
@@ -176,6 +188,9 @@ class PrintService {
       status: 'idle',
       lastJobId: state.lastJobId,
       lastJobDuration: state.lastJobDuration ? Math.round(state.lastJobDuration / 1000) : null,
+      lastSuccessTime: state.lastSuccessTime ? new Date(state.lastSuccessTime).toISOString() : null,
+      lastFailureTime: state.lastFailureTime ? new Date(state.lastFailureTime).toISOString() : null,
+      lastError: state.lastError || null,
       message: 'Impressora disponível'
     };
   }
@@ -650,10 +665,15 @@ class PrintService {
         throw new Error('Nenhum conteúdo para impressão IP');
       }
 
-  await this.sendRawBufferToIp(buffer, job.ip, { isZpl: !!job.zpl, port: job.port });
+      await this.sendRawBufferToIp(buffer, job.ip, { isZpl: !!job.zpl, port: job.port });
+      // sucesso
+      this.markPrinterAsIdle(key, { success: true });
       return jobId;
+    } catch (err) {
+      // falha
+      this.markPrinterAsIdle(key, { success: false, error: err });
+      throw err;
     } finally {
-      this.markPrinterAsIdle(key);
       // limpar arquivo temporário se houver
       try {
         if (job.filePath && await fs.pathExists(job.filePath)) {
@@ -684,6 +704,42 @@ class PrintService {
       socket.on('close', () => {
         console.log('[IP Print] Conexão encerrada');
         resolve(true);
+      });
+    });
+  }
+
+  async testPrinterConnectivity(ip, port = null, { timeoutMs = 5000 } = {}) {
+    const rawPort = port || parseInt(process.env.PRINTER_RAW_PORT, 10) || 9100;
+    const start = Date.now();
+    return new Promise((resolve) => {
+      let settled = false;
+      const socket = net.createConnection({ host: ip, port: rawPort });
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        socket.destroy();
+        resolve({ success: false, ip, port: rawPort, latencyMs: null, error: 'timeout', message: `Timeout após ${timeoutMs}ms` });
+      }, timeoutMs);
+      socket.on('connect', () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        const latency = Date.now() - start;
+        socket.end();
+        resolve({ success: true, ip, port: rawPort, latencyMs: latency, message: 'Conexão TCP estabelecida' });
+      });
+      socket.on('error', (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve({ success: false, ip, port: rawPort, latencyMs: null, error: err.code || 'ERROR', message: err.message });
+      });
+      socket.on('timeout', () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        socket.destroy();
+        resolve({ success: false, ip, port: rawPort, latencyMs: null, error: 'timeout', message: 'Socket timeout' });
       });
     });
   }

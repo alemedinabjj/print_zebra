@@ -98,6 +98,32 @@ app.get('/printer-ip-status', async (request, reply) => {
   }
 });
 
+// GET /printer-ip-check?ip=..&port=..
+// Testa conectividade TCP rápida (sem enviar dados) para diagnosticar ECONNREFUSED / timeout
+app.get('/printer-ip-check', async (request, reply) => {
+  try {
+    const { ip, port } = request.query || {};
+    const targetIp = ip || process.env.PRINTER_IP;
+    let targetPort = port !== undefined ? parseInt(port, 10) : null;
+    if (!targetIp) {
+      return reply.status(400).send({ success: false, error: 'IP não fornecido (param ip ou PRINTER_IP)' });
+    }
+    if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(targetIp)) {
+      return reply.status(400).send({ success: false, error: 'Formato de IP inválido' });
+    }
+    if (targetPort !== null && (isNaN(targetPort) || targetPort < 1 || targetPort > 65535)) {
+      return reply.status(400).send({ success: false, error: 'Port inválida (1-65535)' });
+    }
+    const result = await printService.testPrinterConnectivity(targetIp, targetPort);
+    // Acrescentar estado conhecido (último sucesso/erro)
+    const state = printService.getPrinterState(targetIp);
+    return { success: true, check: result, state };
+  } catch (error) {
+    request.log.error('Erro em /printer-ip-check:', error);
+    return reply.status(500).send({ success: false, error: 'Falha ao testar conectividade', details: error.message });
+  }
+});
+
 const start = async () => {
   try {
     const port = parseInt(process.env.AGENT_PORT, 10) || 4545;
