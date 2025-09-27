@@ -6,6 +6,7 @@ import os from 'os';
 import https from 'https';
 import http from 'http';
 import net from 'net';
+import { exec } from 'child_process';
 
 const { print, getPrinters } = pdfToPrinter;
 
@@ -507,6 +508,34 @@ class PrintService {
         continue; // seguir para próximo se houver
       }
 
+      // Verificar se é um job de ZPL via spool (USB compartilhada / CUPS)
+      if (nextJob.zplShared) {
+        const key = nextJob.printerName || nextJob.sharePath || 'shared-unknown';
+        if (this.isPrinterBusy(key)) {
+          const state = this.getPrinterState(key);
+            if (state.duration > 30) {
+              console.log(`[Print Queue] Impressora compartilhada ${key} ocupada há ${state.duration}s, tentando novamente em 5s...`);
+              setTimeout(() => this.processNextInQueue(), 5000);
+              isPrinting = false;
+              return;
+            }
+            console.log(`[Print Queue] Impressora compartilhada ${key} ocupada há ${state.duration}s, aguardando 2s...`);
+            setTimeout(() => this.processNextInQueue(), 2000);
+            isPrinting = false;
+            return;
+        }
+        const job = printQueue.shift();
+        console.log(`[Print Queue] Processando job ZPL compartilhado (${key}), ${printQueue.length} restantes na fila`);
+        try {
+          const jobId = await this.processSharedZplJob(job);
+          job.resolve({ success: true, message: 'ZPL enviado via spool', jobId, printerKey: key, mode: 'zpl-shared' });
+        } catch (error) {
+          console.error(`[Print Queue] Erro em job ZPL compartilhado:`, error);
+          job.reject(error);
+        }
+        continue;
+      }
+
       // Job normal baseado em nome de impressora
       const targetPrinterName = nextJob.printerName || await this.getDefaultPrinterName();
       if (this.isPrinterBusy(targetPrinterName)) {
@@ -781,6 +810,98 @@ class PrintService {
       console.error('[IP PDF] Erro ao preparar PDF para IP:', error);
       throw new Error(`Falha ao preparar PDF para IP: ${error.message}`);
     }
+  }
+
+  // ===================== Impressão ZPL via Spool (USB compartilhada / CUPS) =====================
+  async createTempZplFile(zplString) {
+    const timestamp = Date.now();
+    const filePath = path.join(this.tempDir, `print-job-${timestamp}.zpl`);
+    await fs.writeFile(filePath, zplString, 'utf8');
+    return filePath;
+  }
+
+  async processSharedZplJob(job) {
+    const jobId = `spool_job_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+    const key = job.printerName || job.sharePath || 'shared-unknown';
+    this.markPrinterAsBusy(key, jobId);
+    let tempPath = null;
+    try {
+      tempPath = await this.createTempZplFile(job.zpl);
+      const platform = process.platform; // win32, linux, darwin
+      if (platform === 'win32') {
+        let command;
+        if (job.sharePath) {
+          // Garantir que tenha o prefixo \\ para UNC
+          let share = job.sharePath;
+          if (!share.startsWith('\\\\')) {
+            // Substituir inicial simples \\ caso fornecido simples
+            share = share.replace(/^\\/, '');
+            share = `\\\\${share}`;
+          }
+          command = `cmd /c copy /B "${tempPath}" "${share}"`;
+        } else if (job.printerName) {
+          // Usar PowerShell Out-Printer (pode não ser 100% RAW, mas geralmente funciona com ZPL se driver raw)
+          const escaped = job.printerName.replace(/"/g, '\"');
+          command = `powershell -Command "Get-Content -Raw -Path '${tempPath}' | Out-Printer -Name \"${escaped}\""`;
+        } else {
+          throw new Error('Nenhuma sharePath ou printerName fornecida para spool Windows');
+        }
+        await this.execCommand(command, { timeout: 30000 });
+      } else {
+        // Linux / macOS via CUPS
+        if (!job.printerName) {
+          throw new Error('printerName é obrigatório em sistemas não Windows para spool');
+        }
+        const escaped = job.printerName.replace(/"/g, '\"');
+        const command = `lp -d "${escaped}" -o raw "${tempPath}"`;
+        await this.execCommand(command, { timeout: 30000 });
+      }
+      this.markPrinterAsIdle(key, { success: true });
+      return jobId;
+    } catch (err) {
+      this.markPrinterAsIdle(key, { success: false, error: err });
+      throw err;
+    } finally {
+      if (tempPath) {
+        try { await fs.unlink(tempPath); } catch (e) { console.warn(`[Spool ZPL] Falha ao remover temp: ${e.message}`); }
+      }
+    }
+  }
+
+  async execCommand(command, { timeout = 30000 } = {}) {
+    return new Promise((resolve, reject) => {
+      const child = exec(command, { windowsHide: true }, (error, stdout, stderr) => {
+        if (error) {
+          return reject(new Error(`Comando falhou: ${error.message} | stderr: ${stderr}`));
+        }
+        resolve({ stdout, stderr });
+      });
+      if (timeout) {
+        setTimeout(() => {
+          try { child.kill(); } catch {}
+          reject(new Error(`Timeout ao executar comando: ${command}`));
+        }, timeout);
+      }
+    });
+  }
+
+  async printZplShared(zplString, { printerName = null, sharePath = null } = {}) {
+    if (!printerName && !sharePath) {
+      throw new Error('É necessário fornecer printerName ou sharePath para impressão compartilhada');
+    }
+    return new Promise((resolve, reject) => {
+      const timeoutId = setTimeout(() => reject(new Error('Print job timeout after 120 seconds')), 120000);
+      printQueue.push({
+        zplShared: true,
+        printerName,
+        sharePath,
+        zpl: zplString,
+        resolve: (r) => { clearTimeout(timeoutId); resolve(r); },
+        reject: (e) => { clearTimeout(timeoutId); reject(e); }
+      });
+      console.log(`[Print Queue] Job ZPL compartilhado adicionado. Total fila: ${printQueue.length}`);
+      if (!isPrinting) this.processNextInQueue();
+    });
   }
 }
 

@@ -17,11 +17,11 @@ app.addContentTypeParser('application/json', { parseAs: 'string' }, function (re
 app.get('/health', async () => ({ status: 'ok', role: 'local-print-agent', timestamp: new Date().toISOString() }));
 
 // POST /print-from-url-ip
-// Body: { pdfUrl: string, ip?: string, port?: number }
-// Se ip ausente, usa PRINTER_IP do ambiente. Se port ausente, usa PRINTER_RAW_PORT ou 9100
+// Body: { pdfUrl: string, ip?: string, port?: number, printerName?: string, sharePath?: string }
+// Se ip presente => envia via socket IP; caso contrário tenta spool usando printerName/sharePath (PDF -> teremos que converter? Aqui mantemos IP only; spool PDF já existe via rotas locais originais se necessário)
 app.post('/print-from-url-ip', async (request, reply) => {
   try {
-    const { pdfUrl, ip, port } = request.body || {};
+    const { pdfUrl, ip, port, printerName, sharePath } = request.body || {};
     const targetIp = ip || process.env.PRINTER_IP;
     let targetPort = port !== undefined ? parseInt(port, 10) : null;
 
@@ -29,24 +29,24 @@ app.post('/print-from-url-ip', async (request, reply) => {
       return reply.status(400).send({ success: false, error: 'pdfUrl é obrigatório' });
     }
     try { new URL(pdfUrl); } catch { return reply.status(400).send({ success: false, error: 'pdfUrl inválida' }); }
+    // Se IP fornecido -> modo IP
+    if (targetIp) {
+      if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(targetIp)) {
+        return reply.status(400).send({ success: false, error: 'Formato de IP inválido' });
+      }
+      if (targetPort !== null && (isNaN(targetPort) || targetPort < 1 || targetPort > 65535)) {
+        return reply.status(400).send({ success: false, error: 'Port inválida (1-65535)' });
+      }
+      if (printService.isPrinterBusy(targetIp)) {
+        const state = printService.getPrinterState(targetIp);
+        return reply.status(409).send({ success: false, error: 'Printer busy', state });
+      }
+      const result = await printService.printPdfFromUrlToIp(pdfUrl, targetIp, targetPort);
+      return { success: true, mode: 'ip', message: 'Job enfileirado (PDF -> IP)', result, ip: targetIp, port: targetPort || parseInt(process.env.PRINTER_RAW_PORT, 10) || 9100 };
+    }
 
-    if (!targetIp) {
-      return reply.status(400).send({ success: false, error: 'IP não fornecido (campo ip ou variável PRINTER_IP)' });
-    }
-    if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(targetIp)) {
-      return reply.status(400).send({ success: false, error: 'Formato de IP inválido' });
-    }
-    if (targetPort !== null && (isNaN(targetPort) || targetPort < 1 || targetPort > 65535)) {
-      return reply.status(400).send({ success: false, error: 'Port inválida (1-65535)' });
-    }
-
-    if (printService.isPrinterBusy(targetIp)) {
-      const state = printService.getPrinterState(targetIp);
-      return reply.status(409).send({ success: false, error: 'Printer busy', state });
-    }
-
-    const result = await printService.printPdfFromUrlToIp(pdfUrl, targetIp, targetPort);
-    return { success: true, message: 'Job enfileirado (PDF -> IP)', result, ip: targetIp, port: targetPort || parseInt(process.env.PRINTER_RAW_PORT, 10) || 9100 };
+    // Sem IP: orientar usar rota específica spool PDF (não implementada aqui) ou implementar futuro
+    return reply.status(400).send({ success: false, error: 'Sem IP: rota atual não suporta PDF via spool ainda. Forneça ip ou implemente /print-pdf-shared.' });
   } catch (error) {
     request.log.error('Erro em /print-from-url-ip:', error);
     return reply.status(500).send({ success: false, error: 'Falha ao processar impressão', details: error.message });
@@ -54,30 +54,42 @@ app.post('/print-from-url-ip', async (request, reply) => {
 });
 
 // POST /print-zpl-ip
-// Body: { zpl: string, ip?: string, port?: number }
+// Body: { zpl: string, ip?: string, port?: number, printerName?: string, sharePath?: string }
+// Se ip -> envia socket; caso contrário usa spool compartilhado
 app.post('/print-zpl-ip', async (request, reply) => {
   try {
-    const { zpl, ip, port } = request.body || {};
+    const { zpl, ip, port, printerName, sharePath } = request.body || {};
     const targetIp = ip || process.env.PRINTER_IP;
     let targetPort = port !== undefined ? parseInt(port, 10) : null;
     if (!zpl) {
       return reply.status(400).send({ success: false, error: 'zpl é obrigatório' });
     }
-    if (!targetIp) {
-      return reply.status(400).send({ success: false, error: 'IP não fornecido (campo ip ou variável PRINTER_IP)' });
+    if (targetIp) {
+      if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(targetIp)) {
+        return reply.status(400).send({ success: false, error: 'Formato de IP inválido' });
+      }
+      if (targetPort !== null && (isNaN(targetPort) || targetPort < 1 || targetPort > 65535)) {
+        return reply.status(400).send({ success: false, error: 'Port inválida (1-65535)' });
+      }
+      if (printService.isPrinterBusy(targetIp)) {
+        const state = printService.getPrinterState(targetIp);
+        return reply.status(409).send({ success: false, error: 'Printer busy', state });
+      }
+      const result = await printService.printZplToIp(zpl, targetIp, targetPort);
+      return { success: true, mode: 'ip', message: 'Job enfileirado (ZPL -> IP)', result, ip: targetIp, port: targetPort || parseInt(process.env.PRINTER_RAW_PORT, 10) || 9100 };
     }
-    if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(targetIp)) {
-      return reply.status(400).send({ success: false, error: 'Formato de IP inválido' });
+
+    // Modo compartilhado (spool)
+    if (!printerName && !sharePath) {
+      return reply.status(400).send({ success: false, error: 'Forneça ip OU printerName/sharePath para impressão compartilhada' });
     }
-    if (targetPort !== null && (isNaN(targetPort) || targetPort < 1 || targetPort > 65535)) {
-      return reply.status(400).send({ success: false, error: 'Port inválida (1-65535)' });
-    }
-    if (printService.isPrinterBusy(targetIp)) {
-      const state = printService.getPrinterState(targetIp);
+    const key = printerName || sharePath;
+    if (this?.printService?.isPrinterBusy && printService.isPrinterBusy(key)) {
+      const state = printService.getPrinterState(key);
       return reply.status(409).send({ success: false, error: 'Printer busy', state });
     }
-    const result = await printService.printZplToIp(zpl, targetIp, targetPort);
-    return { success: true, message: 'Job enfileirado (ZPL -> IP)', result, ip: targetIp, port: targetPort || parseInt(process.env.PRINTER_RAW_PORT, 10) || 9100 };
+    const result = await printService.printZplShared(zpl, { printerName, sharePath });
+    return { success: true, mode: 'shared', message: 'Job enfileirado (ZPL -> Spool)', result, printerName, sharePath };
   } catch (error) {
     request.log.error('Erro em /print-zpl-ip:', error);
     return reply.status(500).send({ success: false, error: 'Falha ao processar ZPL', details: error.message });
@@ -87,11 +99,12 @@ app.post('/print-zpl-ip', async (request, reply) => {
 // Simple status consulta estados registrados (pelo IP)
 app.get('/printer-ip-status', async (request, reply) => {
   try {
-    const { ip } = request.query || {};
-    if (!ip) {
+    const { ip, printerName, sharePath } = request.query || {};
+    if (!ip && !printerName && !sharePath) {
       return { success: true, states: printService.getAllPrinterStates() };
     }
-    return { success: true, ip, state: printService.getPrinterState(ip) };
+    const key = ip || printerName || sharePath;
+    return { success: true, key, state: printService.getPrinterState(key) };
   } catch (error) {
     request.log.error('Erro em /printer-ip-status:', error);
     return reply.status(500).send({ success: false, error: 'Falha ao obter estado', details: error.message });
