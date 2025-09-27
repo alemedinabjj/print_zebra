@@ -192,7 +192,7 @@ app.get('/printer-ip-check', async (request, reply) => {
 
 const start = async () => {
   try {
-    const port = parseInt(process.env.AGENT_PORT, 10) || 4545;
+    const port = parseInt(process.env.AGENT_PORT, 10) || 2323;
     await app.listen({ port, host: '0.0.0.0' });
     console.log(`Local Print Agent rodando em http://0.0.0.0:${port}`);
     if (process.env.PRINTER_IP) {
