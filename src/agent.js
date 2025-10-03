@@ -198,6 +198,12 @@ const start = async () => {
     if (process.env.PRINTER_IP) {
       console.log(`Impressora alvo padrão (PRINTER_IP): ${process.env.PRINTER_IP}`);
     }
+    
+    // Enviar sinal 'ready' para o PM2
+    if (process.send) {
+      process.send('ready');
+      console.log('Sinal PM2 ready enviado');
+    }
   } catch (err) {
     app.log.error(err);
     process.exit(1);

@@ -476,6 +476,12 @@ const start = async () => {
     const port = parseInt(process.env.PORT, 10) || 3333;
     await app.listen({ port, host: '0.0.0.0' });
     console.log(`Server running at http://0.0.0.0:${port}`);
+    
+    // Enviar sinal 'ready' para o PM2
+    if (process.send) {
+      process.send('ready');
+      console.log('Sinal PM2 ready enviado');
+    }
   } catch (err) {
     app.log.error(err);
     process.exit(1);
