@@ -1,30 +1,30 @@
-# Configuração do Cloudflared como serviço no Windows
+# Configuracao do Cloudflared como servico no Windows
 # Execute este script como administrador
 
-Write-Host "===== Configurando Cloudflared Tunnel como serviço no Windows ====="
+Write-Host "===== Configurando Cloudflared Tunnel como servico no Windows ====="
 
-# Verificar se o Cloudflared está instalado
+# Verificar se o Cloudflared esta instalado
 try {
     $cloudflaredVersion = (& cloudflared --version) 2>$null
     Write-Host "Cloudflared encontrado"
 } catch {
-    Write-Host "Erro: Cloudflared não está instalado"
-    Write-Host "Instale seguindo as instruções em: https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/installation"
+    Write-Host "Erro: Cloudflared nao esta instalado"
+    Write-Host "Instale seguindo as instrucoes em: https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/installation"
     exit 1
 }
 
-# Solicitar nome do túnel
-$TUNNEL_NAME = Read-Host -Prompt "Nome do túnel Cloudflare (ex: print-tunnel)"
+# Solicitar nome do tunel
+$TUNNEL_NAME = Read-Host -Prompt "Nome do tunel Cloudflare (ex: print-tunnel)"
 
-# Verificar se o túnel existe
+# Verificar se o tunel existe
 $tunnelExists = cloudflared tunnel list | Select-String $TUNNEL_NAME
 if (-not $tunnelExists) {
-    Write-Host "Erro: Túnel '$TUNNEL_NAME' não existe"
-    Write-Host "Crie o túnel primeiro com: cloudflared tunnel create $TUNNEL_NAME"
+    Write-Host "Erro: Tunel '$TUNNEL_NAME' nao existe"
+    Write-Host "Crie o tunel primeiro com: cloudflared tunnel create $TUNNEL_NAME"
     exit 1
 }
 
-# Caminho para executável do Cloudflared
+# Caminho para executavel do Cloudflared
 $CLOUDFLARED_PATH = (Get-Command cloudflared).Path
 
 # Criar e instalar o serviço Windows
