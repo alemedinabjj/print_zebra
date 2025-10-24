@@ -480,6 +480,7 @@ class PrintService {
 
       const options = {
         printer: printerName,
+        scale: 'fit', // Don't scale the PDF
         silent: true, // Run silently without showing print dialog
       };
 
@@ -1013,7 +1014,7 @@ class PrintService {
           throw new Error('Não foi possível determinar printerName para PDF no Windows (forneça printerName).');
         }
         try {
-          await print(job.filePath, { printer: targetPrinter, silent: true });
+          await print(job.filePath, { printer: targetPrinter, silent: true, scale: 'fit' });
         } catch (e) {
           throw new Error(`Falha ao imprimir PDF via pdf-to-printer: ${e.message}`);
         }
